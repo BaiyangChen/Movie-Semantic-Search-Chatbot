@@ -1,0 +1,52 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Chainlit/runtime cache
+.chainlit/
+.files/
+.cache/
+
+# Generated local data and large media
+data/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.faiss
+*.index
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Temporary outputs
+_pdf_extract.txt
+*.log
+tmp/
+temp/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -17,6 +17,10 @@ from typing import Dict, Optional
 from docx import Document
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.types import ThreadDict
+from video_rag.search_faiss_index import (
+    search_video_chunks,
+    format_video_chunk_for_prompt,
+)
 
 os.environ['CHAINLIT_AUTH_SECRET'] = "HL8lZ_~NsbXKTvtE:1GuO2D,~pnE*Fq-.s9b^w,ok:2MUkXXMdr2PPkqhMe4UZNR"
 os.environ['DATABASE_URL'] = "postgresql+asyncpg://chainlit_user:12345678@localhost:5432/chainlit_db"
@@ -76,6 +80,102 @@ def is_document_file(element):
     path = (element.path or '').lower()
     return path.endswith(('.pdf', '.docx', '.txt'))
 
+async def video_agent(user_query: str, settings: dict) -> str:
+    # Implementation for the video agent
+    async with cl.Step(name = "Video Agent: Searching for relavant video content", type="tool") as step:
+        await step.send()
+        loop = asyncio.get_event_loop()
+        search_results = await loop.run_in_executor(None, search_video_chunks, user_query, 5)
+        
+        video_context = format_video_chunk_for_prompt(search_results)
+        if not video_context:
+            return "I couldn't find any relevant video content based on your query."
+        
+        step.output = video_context
+        await step.update()
+        
+        messages = [
+            {
+                "role": "system",
+                "content": """
+                    You are a video analysis agent.
+                    Answer the user using only the retrieved video chunks.
+                    If the chunks do not contain enough evidence, say that clearly.
+                    Mention relevant timestamps when useful.
+                """,
+            },
+            {
+                "role": "user",
+                "content": f"""
+                    User question:
+                    {user_query}
+
+                    Retrieved video chunks:
+                    {video_context}
+                """,
+            },
+        ]
+
+    response = ollama.chat(
+        model=settings["Models"],
+        messages=messages,
+        stream=False,
+        think=False,
+        options={"temperature": settings["Temperature"]},
+    )
+
+    return response["message"]["content"]
+
+async def master_route(user_query: str, settings: Dict) -> str:
+    route_messages = [
+        {
+            "role": "system",
+            "content": """
+                You are a routing agent.
+                Decide whether the user's request needs video retrieval.
+
+                Return only one word:
+                video - if the user asks about video content, transcript, timestamps, scenes, visual notes, or anything likely stored in the video index.
+                direct - for normal conversation, coding, general knowledge, document/image uploads, or anything not requiring video search.
+            """,
+        },
+        {
+            "role": "user",
+            "content": user_query,
+        },
+    ]
+
+    response = ollama.chat(
+        model=settings["Models"],
+        messages=route_messages,
+        stream=False,
+        think=False,
+        options={"temperature": 0},
+    )
+
+    decision = response["message"]["content"].strip().lower()
+
+    if "video" in decision:
+        return "video"
+
+    return "direct"
+
+
+
+@cl.set_chat_profiles
+async def chat_profiles():
+    return [
+        cl.ChatProfile(
+            name="Master",
+            description="Main controller agent for general conversations and automatically decides whether to use the video agent",
+            icon="💬"
+        ),
+        cl.ChatProfile(
+            name="VideoRAG",
+            description="Directly answers questions using the video retrieval agent.",
+            icon="🎥"
+        )
+    ]
 
 @cl.password_auth_callback
 def auth_callback(username:str, password:str):
@@ -85,6 +185,7 @@ def auth_callback(username:str, password:str):
 async def on_chat_start():
     start_ollama()
     cl.user_session.set('chat_history', [])
+    profile = cl.user_session.get("chat_profile")
 
     settings = await cl.ChatSettings(
         [
@@ -115,6 +216,7 @@ async def on_chat_start():
             )
         ]
     ).send()
+    cl.user_session.set("active_profile", profile or "Master")
     cl.user_session.set('settings', settings)
 
 @cl.data_layer

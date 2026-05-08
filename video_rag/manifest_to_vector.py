@@ -79,6 +79,10 @@ def main():
         "embed_model": DEFAULT_EMBED_MODEL,
         "metadata_by_faiss_id": metadata_by_faiss_id,
     }
-    
+
     with metadata_path.open("w", encoding="utf-8") as f:
         json.dump(metadata_file, f, ensure_ascii=False, indent=2)
+
+
+if __name__ == "__main__":
+    main()

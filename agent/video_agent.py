@@ -1,13 +1,17 @@
 from video_rag.video_index_service import VideoIndexService
 from video_rag.search_faiss_index import format_video_chunk_for_prompt
 from agent.types import AgentResponse, VideoCitation
+from agent.base_agent import BaseAgent
 
 from agent.agent_prompt.prompt_template import PROMPTS
 import ollama
 
 
-class VideoAgent:
+class VideoAgent(BaseAgent):
+    name = "video_agent"
+    description = "An agent that answers questions about indexed video content, including scenes, timestamps, transcripts, and visual notes. It can search for relevant video chunks using the search_video_tool and use that information to answer user questions about the videos."
     def __init__(self, model: str, index_service: VideoIndexService, temperature: float = 0.7):
+        super().__init__()
         self.model = model
         self.index_service = index_service
         self.temperature = temperature

@@ -10,17 +10,12 @@ import time
 import chainlit as cl
 import socket
 
-
+from agent.agent_factory import create_agent_registry
 from chainlit.input_widget import Select, Switch, Slider
-from dotenv import load_dotenv
 from typing import Dict, Optional
 from docx import Document
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.types import ThreadDict
-from video_rag.search_faiss_index import (
-    search_video_chunks,
-    format_video_chunk_for_prompt,
-)
 
 os.environ['CHAINLIT_AUTH_SECRET'] = "HL8lZ_~NsbXKTvtE:1GuO2D,~pnE*Fq-.s9b^w,ok:2MUkXXMdr2PPkqhMe4UZNR"
 os.environ['DATABASE_URL'] = "postgresql+asyncpg://chainlit_user:12345678@localhost:5432/chainlit_db"
@@ -28,10 +23,12 @@ os.environ['DATABASE_URL'] = "postgresql+asyncpg://chainlit_user:12345678@localh
 models = [
     'fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4',
     'fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b',
+    "qwen3-vl:4b"
 ]
 
 thinking_models = {
     'fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4',
+    "qwen3-vl:4b"
 }
 
 def _ollama():
@@ -80,99 +77,17 @@ def is_document_file(element):
     path = (element.path or '').lower()
     return path.endswith(('.pdf', '.docx', '.txt'))
 
-async def video_agent(user_query: str, settings: dict) -> str:
-    # Implementation for the video agent
-    async with cl.Step(name = "Video Agent: Searching for relavant video content", type="tool") as step:
-        await step.send()
-        loop = asyncio.get_event_loop()
-        search_results = await loop.run_in_executor(None, search_video_chunks, user_query, 5)
-        
-        video_context = format_video_chunk_for_prompt(search_results)
-        if not video_context:
-            return "I couldn't find any relevant video content based on your query."
-        
-        step.output = video_context
-        await step.update()
-        
-        messages = [
-            {
-                "role": "system",
-                "content": """
-                    You are a video analysis agent.
-                    Answer the user using only the retrieved video chunks.
-                    If the chunks do not contain enough evidence, say that clearly.
-                    Mention relevant timestamps when useful.
-                """,
-            },
-            {
-                "role": "user",
-                "content": f"""
-                    User question:
-                    {user_query}
-
-                    Retrieved video chunks:
-                    {video_context}
-                """,
-            },
-        ]
-
-    response = ollama.chat(
-        model=settings["Models"],
-        messages=messages,
-        stream=False,
-        think=False,
-        options={"temperature": settings["Temperature"]},
-    )
-
-    return response["message"]["content"]
-
-async def master_route(user_query: str, settings: Dict) -> str:
-    route_messages = [
-        {
-            "role": "system",
-            "content": """
-                You are a routing agent.
-                Decide whether the user's request needs video retrieval.
-
-                Return only one word:
-                video - if the user asks about video content, transcript, timestamps, scenes, visual notes, or anything likely stored in the video index.
-                direct - for normal conversation, coding, general knowledge, document/image uploads, or anything not requiring video search.
-            """,
-        },
-        {
-            "role": "user",
-            "content": user_query,
-        },
-    ]
-
-    response = ollama.chat(
-        model=settings["Models"],
-        messages=route_messages,
-        stream=False,
-        think=False,
-        options={"temperature": 0},
-    )
-
-    decision = response["message"]["content"].strip().lower()
-
-    if "video" in decision:
-        return "video"
-
-    return "direct"
-
-
-
 @cl.set_chat_profiles
 async def chat_profiles():
     return [
         cl.ChatProfile(
             name="Master",
-            description="Main controller agent for general conversations and automatically decides whether to use the video agent",
+            markdown_description="Main controller agent for general conversations and automatically decides whether to use the video agent",
             icon="💬"
         ),
         cl.ChatProfile(
             name="VideoRAG",
-            description="Directly answers questions using the video retrieval agent.",
+            markdown_description="Directly answers questions using the video retrieval agent.",
             icon="🎥"
         )
     ]
@@ -184,8 +99,7 @@ def auth_callback(username:str, password:str):
 @cl.on_chat_start
 async def on_chat_start():
     start_ollama()
-    cl.user_session.set('chat_history', [])
-    profile = cl.user_session.get("chat_profile")
+    profile = cl.user_session.get("chat_profile") or "Master"
 
     settings = await cl.ChatSettings(
         [
@@ -193,14 +107,14 @@ async def on_chat_start():
                 id="Models",
                 label="Model",
                 values=models,
-                initial_value='fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4'
+                initial_value='qwen3-vl:4b'
             ),
             Switch(id="Think", label="Enable thinking for Qwen3 models", initial=False),
-            Switch(id="Streaming", label="Stream Tokens", initial=True),
+            Switch(id="Streaming", label="Stream Tokens", initial=False),
             Slider(
                 id="Temperature",
                 label="Temperature",
-                initial=1,
+                initial=0.7,
                 min=0,
                 max=2,
                 step=0.1,
@@ -216,8 +130,16 @@ async def on_chat_start():
             )
         ]
     ).send()
-    cl.user_session.set("active_profile", profile or "Master")
+
+    registry = create_agent_registry(
+        model=settings['Models']
+    )
+
+    cl.user_session.set("active_profile", profile)
     cl.user_session.set('settings', settings)
+    cl.user_session.set("agent_registry", registry)
+    cl.user_session.set('chat_history', [])
+
 
 @cl.data_layer
 def get_data_layer():
@@ -237,10 +159,20 @@ async def on_chat_resume(thread: ThreadDict):
 @cl.on_message
 async def on_message(message : cl.message):
     chat_history = cl.user_session.get('chat_history', [])
-    settings = cl.user_session.get('settings')
-    model = settings['Models']
-    settings['Think'] = settings['Think'] and model in thinking_models
+
+    setting = cl.user_session.get('settings', {})
+
+    # agent set up
+    registry = cl.user_session.get('agent_registry')
+    active_profile = cl.user_session.get("active_profile")
+    agent = registry.get_agent_by_profile(active_profile)
+
+    # get model config
+    can_think = setting.get("Think", False) and agent.model in thinking_models
+    is_stream = setting.get("Streaming", False)
+    temperature = setting.get("Temperature", 0.7)
     
+    # document and image handling
     files = [file for file in message.elements]
     document_files = [file for file in files if is_document_file(file)]
     image_files = [file for file in files if is_image_file(file)]
@@ -257,44 +189,27 @@ async def on_message(message : cl.message):
             await reading_documents.remove()
 
     user_message = {'role': 'user', 'content': message.content}
+    
     if image_files:
         user_message['images'] = [image.path for image in image_files if image.path]
 
     chat_history.append(user_message)
 
-    stream = ollama.chat(
-            model=settings['Models'],
-            messages=chat_history,
-            stream=settings['Streaming'],
-            think=settings['Think'],
-            options={ 'temperature': settings['Temperature'] }
-        )
-    
-    thinking = False
+    # response set up
     assistant_response = ''
-    start = time.time()
     final_answer = cl.Message(content="")
-
-    if settings["Think"]:
-        async with cl.Step(name='Thinking', type='llm') as thinking_step:
-            for chunk in stream:
-                think = chunk.get("message", {}).get("thinking", "")
-                if think:
-                    thinking = True
-                    await thinking_step.stream_token(think)
-                elif settings["Think"] and thinking:
-                    thinking = False
-                    thought_duration = round(time.time()-start)
-                    thinking_step.name = f"Thought for {thought_duration}s"
-                    await thinking_step.update()
-                    break
-
-    for chunk in stream:
-        content = chunk.get("message", {}).get("content", "")
-        if content:
-            assistant_response += content
-            await final_answer.stream_token(content)
-
+    
     await final_answer.send()
+    
+    if is_stream:
+        stream_iter = agent.run_with_stream(query=message.content, chat_history=chat_history, can_think=can_think, is_stream=is_stream, temperature=temperature)
+        async for stream in stream_iter:
+            await final_answer.stream_token(stream)
+            assistant_response += stream
+    else:
+        response = await agent.run_without_stream(query=message.content, chat_history=chat_history, can_think=can_think, is_stream=is_stream, temperature=temperature)
+        assistant_response += response.answer
+        final_answer.content = assistant_response
 
+    await final_answer.update()
     chat_history.append({'role':'assistant', 'content': assistant_response})

@@ -12,7 +12,10 @@ class VideoIndexService:
         if not query:
             return []
 
-        top_k = min(max(top_k, 1), self.max_top_k)
+        # The LLM may request a very small top_k. Keep enough context for
+        # visually specific questions where the exact match can rank below
+        # broad "stone/building/man" matches in pure vector search.
+        top_k = min(max(top_k, 5), self.max_top_k)
 
         raw_results = search_video_chunks(query=query, top_k=top_k)
 
